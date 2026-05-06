@@ -16,7 +16,7 @@ from rpy2_bridge import immunedeconv, df_to_r_matrix, r_to_df
 
 logger = logging.getLogger(__name__)
 
-_COMPOSITE_NAMES = {"ImmuneScore", "StromaScore", "MicroenvironmentScore"}
+_COMPOSITE_NAMES = {"immune score", "stroma score", "microenvironment score"}
 
 
 class XCellScorer:

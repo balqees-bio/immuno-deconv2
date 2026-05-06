@@ -90,7 +90,39 @@ class MasterMerger:
         )
 
         self._validate(master)
+
+        # ── Optional clinical join ─────────────────────────────────────────
+        clinical_path = out / "clinical_harmonized.csv"
+        if clinical_path.exists():
+            master = self._join_clinical(master, clinical_path)
+
         return master
+
+    def _join_clinical(self, master: pd.DataFrame, clinical_path) -> pd.DataFrame:
+        """Left-join harmonised clinical metadata onto the master deconv table."""
+        clinical = pd.read_csv(clinical_path, low_memory=False)
+
+        # Align on sample_id (clinical) == master index (sample barcode)
+        if "sample_id" not in clinical.columns:
+            logger.warning("clinical_harmonized.csv has no 'sample_id' column — skipping join.")
+            return master
+
+        clinical_indexed = clinical.set_index("sample_id")
+
+        # Drop columns already in master to avoid collisions
+        overlap = master.columns.intersection(clinical_indexed.columns)
+        if len(overlap):
+            logger.debug("Dropping overlapping clinical columns before join: %s", overlap.tolist())
+            clinical_indexed = clinical_indexed.drop(columns=overlap)
+
+        combined = master.join(clinical_indexed, how="left")
+        combined_path = clinical_path.parent / "Domain2_master_with_clinical.csv"
+        combined.to_csv(combined_path)
+        logger.info(
+            "Master + clinical saved: %s  (%d samples × %d features)",
+            combined_path, combined.shape[0], combined.shape[1],
+        )
+        return combined
 
     # ------------------------------------------------------------------
     def _load(self, path: Path, label: str) -> pd.DataFrame | None:
@@ -145,7 +177,7 @@ class MasterMerger:
             if neg:
                 errors.append(f"TIMER has {neg} negative fraction values")
 
-        xcell_me = "xCell_MicroenvironmentScore"
+        xcell_me = "xCell_microenvironment score"
         if xcell_me in master.columns:
             neg_me = int((master[xcell_me] < 0).sum())
             if neg_me:

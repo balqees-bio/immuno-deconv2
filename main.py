@@ -7,10 +7,14 @@ python main.py \\
     --input  expression_tpm.csv \\
     --output ./results \\
     --cancer-type SKCM \\
+    [--clinical-patient clinical_patient.txt] \\
+    [--clinical-sample  clinical_sample.txt] \\
+    [--clinical-source  tcga] \\
     [--metadata metadata.csv] \\
     [--methods epic quantiseq mcp_counter] \\
     [--cibersort-binary /path/CIBERSORT.R] \\
     [--cibersort-mat /path/LM22.txt] \\
+    [--skip-clinical] \\
     [--skip-row3] [--skip-row4] [--skip-row5] [--skip-row6]
 """
 import argparse
@@ -54,6 +58,23 @@ def parse_args() -> argparse.Namespace:
                    help="Path to CIBERSORT.R (enables CIBERSORTx; also set --cibersort-mat)")
     p.add_argument("--cibersort-mat", metavar="PATH",
                    help="Path to LM22.txt signature matrix (required with --cibersort-binary)")
+    # ── clinical harmonization ────────────────────────────────────────────
+    p.add_argument("--clinical-patient", metavar="FILE",
+                   help="Patient-level clinical file (e.g. GDC clinical_patient.txt)")
+    p.add_argument("--clinical-sample", metavar="FILE",
+                   help="Sample-level clinical file (e.g. GDC clinical_sample.txt)")
+    p.add_argument("--clinical-source", default="tcga",
+                   choices=["tcga"],
+                   metavar="SOURCE",
+                   help="Clinical data source / harmonizer to use (default: tcga)")
+    p.add_argument("--skip-clinical", action="store_true",
+                   help="Skip clinical harmonization (Row 0)")
+    # ── visualization ─────────────────────────────────────────────────────
+    p.add_argument("--skip-plots", action="store_true",
+                   help="Skip Row 8 visualization (plots still runnable via plots.py)")
+    p.add_argument("--dpi", type=int, default=150,
+                   help="Plot resolution in DPI (default: 150)")
+    # ── deconvolution rows ────────────────────────────────────────────────
     p.add_argument("--skip-row3", action="store_true",
                    help="Skip Row 3 (immune cell fractions)")
     p.add_argument("--skip-row4", action="store_true",
@@ -79,12 +100,20 @@ class Domain2Pipeline:
     def run(self) -> None:
         args = self.args
 
-        # ── Load & validate expression matrix ─────────────────────────────
-        self.logger.info("Loading expression matrix: %s", args.input)
-        from input_validation import load_expression_matrix
-        expr_tpm, _ = load_expression_matrix(args.input, log2_offset=args.log2_offset)
-        # Note: expr_log2 is not passed to callers — each module handles its
-        # own transform requirement internally (IPS does log2 inside row5_ips.py)
+        # ── Row 0: Clinical harmonization ──────────────────────────────────
+        if not args.skip_clinical:
+            self._run_clinical()
+        else:
+            self.logger.info("Row 0 skipped (--skip-clinical).")
+
+        # ── Load & validate expression matrix (only when deconv rows will run) ──
+        _deconv_needed = not (args.skip_row3 and args.skip_row4
+                              and args.skip_row5 and args.skip_row6)
+        expr_tpm = None
+        if _deconv_needed:
+            self.logger.info("Loading expression matrix: %s", args.input)
+            from input_validation import load_expression_matrix
+            expr_tpm, _ = load_expression_matrix(args.input, log2_offset=args.log2_offset)
 
         # ── Row 3: Immune Cell Fractions ───────────────────────────────────
         if not args.skip_row3:
@@ -148,8 +177,62 @@ class Domain2Pipeline:
             timer_cancer_type=args.cancer_type,
         )
 
+        # ── Row 8: Visualization ───────────────────────────────────────────
+        if not args.skip_plots:
+            self.logger.info("=" * 60)
+            self.logger.info("Row 8 — Visualization")
+            self._run_plots()
+        else:
+            self.logger.info("Row 8 skipped (--skip-plots).")
+
         self.logger.info("=" * 60)
         self.logger.info("Domain 2 pipeline complete. Outputs: %s", self.output_dir)
+
+    # ── plot helper ───────────────────────────────────────────────────────
+
+    def _run_plots(self) -> None:
+        try:
+            from plots import VisualizationSuite
+        except ImportError as exc:
+            self.logger.warning(
+                "matplotlib/seaborn not available — skipping plots (%s). "
+                "Install with: pip install matplotlib seaborn scikit-learn", exc,
+            )
+            return
+
+        VisualizationSuite().run(
+            output_dir=str(self.output_dir),
+            cohort=self.args.cancer_type or "",
+            dpi=self.args.dpi,
+        )
+
+    # ── clinical helper ───────────────────────────────────────────────────
+
+    def _run_clinical(self) -> None:
+        args = self.args
+
+        if not args.clinical_patient or not args.clinical_sample:
+            self.logger.info(
+                "Row 0 — clinical harmonization skipped "
+                "(pass --clinical-patient and --clinical-sample to enable)."
+            )
+            return
+
+        self.logger.info("=" * 60)
+        self.logger.info("Row 0 — Clinical Harmonization (%s)", args.clinical_source)
+
+        from clinical_harmonizer import HARMONIZERS
+        harmonizer_cls = HARMONIZERS.get(args.clinical_source)
+        if harmonizer_cls is None:
+            self.logger.error("Unknown --clinical-source '%s'.", args.clinical_source)
+            return
+
+        output_path = str(self.output_dir / "clinical_harmonized.csv")
+        harmonizer_cls().run(
+            output_path=output_path,
+            patient_file=args.clinical_patient,
+            sample_file=args.clinical_sample,
+        )
 
 
 def main() -> None:
